@@ -288,6 +288,7 @@ const audioCtxMap = {};
 function setupSpeaking(stream, tileId) {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === 'suspended') ctx.resume();
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 512;
     const src = ctx.createMediaStreamSource(stream);
