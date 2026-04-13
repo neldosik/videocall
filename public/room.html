@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Звонок</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="theme-color" content="#0f0f13">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --accent: #6c63ff;
+      --green: #48cfad;
+      --red: #e53935;
+      --bg: #0f0f13;
+      --surface: #1a1a24;
+      --border: rgba(255,255,255,0.08);
+    }
+    html, body { height: 100dvh; background: var(--bg); color: #f0f0f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; overflow: hidden; }
+
+    /* ── Main layout ── */
+    #app { display: flex; height: 100dvh; }
+    #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+    /* ── Video grid ── */
+    #grid {
+      flex: 1; display: grid; gap: 3px; background: #000;
+      overflow: hidden; position: relative;
+    }
+    #grid[data-n="1"] { grid-template-columns: 1fr; }
+    #grid[data-n="2"] { grid-template-columns: 1fr 1fr; }
+    #grid[data-n="3"],#grid[data-n="4"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+    #grid[data-n="5"],#grid[data-n="6"] { grid-template-columns: repeat(3, 1fr); }
+    #grid[data-n="7"],#grid[data-n="8"],#grid[data-n="9"] { grid-template-columns: repeat(3, 1fr); }
+    @media (max-width: 500px) {
+      #grid[data-n="2"] { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+    }
+
+    /* ── Tile ── */
+    .tile {
+      position: relative; background: var(--surface);
+      overflow: hidden; display: flex; align-items: center; justify-content: center;
+      transition: box-shadow 0.15s;
+    }
+    .tile.speaking { box-shadow: inset 0 0 0 3px var(--green); }
+    .tile video { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+    .tile-label {
+      position: absolute; bottom: 10px; left: 10px;
+      background: rgba(0,0,0,0.6); backdrop-filter: blur(6px);
+      padding: 3px 10px; border-radius: 20px; font-size: 0.72rem; font-weight: 500;
+      display: flex; align-items: center; gap: 5px;
+    }
+    .tile-label .mic-off { display: none; color: var(--red); font-size: 0.7rem; }
+    .tile.muted .tile-label .mic-off { display: inline; }
+
+    .tile-avatar {
+      width: 72px; height: 72px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), var(--green));
+      display: flex; align-items: center; justify-content: center;
+      font-size: 2rem; color: #fff; position: absolute;
+    }
+    .tile.cam-off video { opacity: 0; }
+    .tile.cam-off .tile-avatar { display: flex; }
+    .tile:not(.cam-off) .tile-avatar { display: none; }
+
+    /* Local pip */
+    #tile-local.pip {
+      position: absolute; bottom: 88px; right: 10px;
+      width: 90px; height: 130px; border-radius: 12px; z-index: 10;
+      border: 2px solid rgba(255,255,255,0.2);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+    }
+    #tile-local.pip .tile-label { font-size: 0.6rem; padding: 2px 6px; bottom: 6px; left: 6px; }
+
+    /* ── Bottom bar ── */
+    #bar {
+      background: rgba(12,12,18,0.97); backdrop-filter: blur(16px);
+      border-top: 1px solid var(--border);
+      padding: 10px 14px env(safe-area-inset-bottom, 10px);
+      display: flex; flex-direction: column; gap: 8px; z-index: 20;
+    }
+    #share-row {
+      display: flex; align-items: center; gap: 8px;
+      background: rgba(255,255,255,0.04); border-radius: 10px; padding: 7px 12px;
+    }
+    #share-row .room-label { flex: 1; font-size: 0.75rem; color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #share-row .room-label strong { color: #9d97ff; }
+    #copy-btn {
+      background: rgba(108,99,255,0.15); border: 1px solid rgba(108,99,255,0.25);
+      color: #9d97ff; border-radius: 8px; padding: 4px 10px;
+      font-size: 0.72rem; font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+
+    #ctrl-row { display: flex; align-items: center; justify-content: center; gap: 12px; }
+
+    .ctrl {
+      width: 50px; height: 50px; border-radius: 50%; border: none; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; font-size: 1.25rem;
+      transition: transform 0.1s, background 0.15s;
+      background: rgba(255,255,255,0.08); color: #f0f0f5; flex-shrink: 0;
+    }
+    .ctrl:active { transform: scale(0.92); }
+    .ctrl.off { background: rgba(255,255,255,0.04); color: #444; }
+    .ctrl.danger { background: var(--red); box-shadow: 0 4px 16px rgba(229,57,53,0.4); width: 56px; height: 56px; font-size: 1.35rem; }
+    .ctrl.chat-has-unread { position: relative; }
+    .ctrl.chat-has-unread::after {
+      content: attr(data-unread); position: absolute; top: 2px; right: 2px;
+      background: var(--red); border-radius: 50%; width: 18px; height: 18px;
+      font-size: 0.65rem; font-weight: 700; display: flex; align-items: center; justify-content: center; color: #fff;
+    }
+
+    #status { text-align: center; font-size: 0.72rem; color: #444; }
+    #status.ok { color: var(--green); }
+    #status.err { color: #ff6b6b; }
+
+    /* ── Chat panel ── */
+    #chat-panel {
+      width: 0; overflow: hidden; transition: width 0.28s ease;
+      display: flex; flex-direction: column;
+      background: var(--surface); border-left: 1px solid var(--border);
+    }
+    #chat-panel.open { width: 280px; }
+    @media (max-width: 600px) {
+      #chat-panel.open { position: fixed; inset: 0; width: 100%; z-index: 50; }
+    }
+
+    #chat-header {
+      padding: 14px 16px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+      font-weight: 600; font-size: 0.9rem; flex-shrink: 0;
+    }
+    #chat-close { background: none; border: none; color: #555; cursor: pointer; font-size: 1.2rem; line-height: 1; }
+    #chat-close:hover { color: #f0f0f5; }
+
+    #chat-messages {
+      flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px;
+      scroll-behavior: smooth;
+    }
+    #chat-messages::-webkit-scrollbar { width: 4px; }
+    #chat-messages::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+    .msg { display: flex; flex-direction: column; gap: 2px; max-width: 100%; }
+    .msg.mine { align-items: flex-end; }
+    .msg-bubble {
+      padding: 7px 11px; border-radius: 14px; font-size: 0.85rem; line-height: 1.4;
+      max-width: 220px; word-break: break-word;
+      background: rgba(255,255,255,0.07); color: #ddd;
+      border-radius: 14px 14px 14px 4px;
+    }
+    .msg.mine .msg-bubble { background: var(--accent); color: #fff; border-radius: 14px 14px 4px 14px; }
+    .msg-time { font-size: 0.62rem; color: #444; padding: 0 4px; }
+
+    .chat-day-sep { text-align: center; font-size: 0.65rem; color: #444; margin: 4px 0; }
+
+    #chat-input-row {
+      display: flex; gap: 8px; padding: 10px 12px env(safe-area-inset-bottom, 10px);
+      border-top: 1px solid var(--border); flex-shrink: 0;
+    }
+    #chat-input {
+      flex: 1; padding: 9px 12px; background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1); border-radius: 20px;
+      color: #f0f0f5; font-size: 0.85rem; outline: none;
+    }
+    #chat-input:focus { border-color: var(--accent); }
+    #chat-send {
+      width: 36px; height: 36px; border-radius: 50%; background: var(--accent);
+      border: none; color: #fff; cursor: pointer; font-size: 1rem;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <!-- Main area -->
+  <div id="main">
+    <div id="grid" data-n="1">
+      <div class="tile" id="tile-local">
+        <video id="localVideo" autoplay muted playsinline></video>
+        <div class="tile-avatar">👤</div>
+        <div class="tile-label">Вы <span class="mic-off">🔇</span></div>
+      </div>
+    </div>
+
+    <div id="bar">
+      <div id="share-row">
+        <div class="room-label">Комната: <strong id="roomCodeDisplay"></strong></div>
+        <button id="copy-btn">Копировать ссылку</button>
+      </div>
+      <div id="ctrl-row">
+        <button class="ctrl" id="micBtn" title="Микрофон">🎤</button>
+        <button class="ctrl" id="camBtn" title="Камера">📷</button>
+        <button class="ctrl danger" id="endBtn" title="Завершить">📵</button>
+        <button class="ctrl" id="chatBtn" title="Чат">💬</button>
+        <button class="ctrl" id="shareBtn" title="Поделиться">🔗</button>
+      </div>
+      <div id="status">Ожидание участников...</div>
+    </div>
+  </div>
+
+  <!-- Chat panel -->
+  <div id="chat-panel">
+    <div id="chat-header">
+      💬 Чат
+      <button id="chat-close">✕</button>
+    </div>
+    <div id="chat-messages"></div>
+    <div id="chat-input-row">
+      <input id="chat-input" placeholder="Сообщение..." maxlength="500" autocomplete="off">
+      <button id="chat-send">➤</button>
+    </div>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+
+const roomId = location.pathname.split('/').pop();
+const socket = io();
+const myId = null; // assigned on connect
+
+const iceServers = [
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:freestun.net:3479' },
+  { urls: 'turn:freestun.net:3479',  username: 'free', credential: 'free' },
+  { urls: 'turn:freestun.net:5350',  username: 'free', credential: 'free' },
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+];
+
+// ── State ──
+let localStream = null;
+let micOn = true, camOn = true;
+const peers = {};
+const remoteStreams = {};
+const pending = {};
+const peerMedia = {}; // peerId -> { audio, video }
+let chatOpen = false, unreadCount = 0;
+let mySocketId = null;
+
+// ── Refs ──
+const grid       = document.getElementById('grid');
+const statusEl   = document.getElementById('status');
+const chatPanel  = document.getElementById('chat-panel');
+const chatMsgs   = document.getElementById('chat-messages');
+const chatInput  = document.getElementById('chat-input');
+const chatBtn    = document.getElementById('chatBtn');
+
+socket.on('connect', () => { mySocketId = socket.id; });
+
+// ── Room code display ──
+document.getElementById('roomCodeDisplay').textContent = roomId;
+
+// ── Copy link ──
+document.getElementById('copy-btn').addEventListener('click', () => {
+  navigator.clipboard.writeText(location.href);
+  document.getElementById('copy-btn').textContent = '✓ Скопировано';
+  setTimeout(() => document.getElementById('copy-btn').textContent = 'Копировать ссылку', 2000);
+});
+
+document.getElementById('shareBtn').addEventListener('click', () => {
+  if (navigator.share) {
+    navigator.share({ title: 'Видеозвонок', url: location.href });
+  } else {
+    navigator.clipboard.writeText(location.href);
+    setStatus('Ссылка скопирована', 'ok');
+    setTimeout(() => updateStatusCount(), 2000);
+  }
+});
+
+// ── Status ──
+function setStatus(text, type = '') {
+  statusEl.textContent = text;
+  statusEl.className = type;
+}
+function updateStatusCount() {
+  const n = Object.keys(peers).length;
+  setStatus(n === 0 ? 'Ожидание участников...' : `В комнате: ${n + 1}`, n > 0 ? 'ok' : '');
+}
+
+// ── Grid layout ──
+function updateGrid() {
+  const count = grid.querySelectorAll('.tile').length;
+  grid.dataset.n = Math.min(count, 9);
+  const localTile = document.getElementById('tile-local');
+  if (count > 1) localTile.classList.add('pip');
+  else localTile.classList.remove('pip');
+}
+
+// ── Speaking detection ──
+const audioCtxMap = {};
+function setupSpeaking(stream, tileId) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    const src = ctx.createMediaStreamSource(stream);
+    src.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    let speaking = false;
+    audioCtxMap[tileId] = ctx;
+
+    const tick = () => {
+      analyser.getByteFrequencyData(data);
+      const avg = data.slice(0, 80).reduce((a, b) => a + b, 0) / 80;
+      const isSpeaking = avg > 12;
+      if (isSpeaking !== speaking) {
+        speaking = isSpeaking;
+        document.getElementById(tileId)?.classList.toggle('speaking', speaking);
+      }
+      if (!ctx.closed) requestAnimationFrame(tick);
+    };
+    tick();
+  } catch {}
+}
+
+// ── Media ──
+async function startMedia() {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24, max: 30 } },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+    document.getElementById('localVideo').srcObject = localStream;
+    setupSpeaking(localStream, 'tile-local');
+  } catch (e) {
+    setStatus('Нет доступа к камере: ' + e.message, 'err');
+  }
+}
+
+// ── PeerConnection factory ──
+function createPC(peerId) {
+  const pc = new RTCPeerConnection({
+    iceServers,
+    iceCandidatePoolSize: 10,
+    bundlePolicy: 'max-bundle',
+    rtcpMuxPolicy: 'require'
+  });
+  peers[peerId] = pc;
+  pending[peerId] = [];
+
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+  const rs = new MediaStream();
+  remoteStreams[peerId] = rs;
+
+  pc.ontrack = (e) => {
+    rs.addTrack(e.track);
+    const vid = document.getElementById('rv-' + peerId);
+    if (vid) { vid.srcObject = rs; tryPlay(vid); }
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) socket.emit('ice-candidate', { to: peerId, candidate: e.candidate });
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    if (pc.iceConnectionState === 'failed') { setStatus('Переподключение...', 'err'); pc.restartIce(); }
+    if (pc.iceConnectionState === 'connected') updateStatusCount();
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') removePeer(peerId);
+  };
+
+  return pc;
+}
+
+async function flushPending(peerId) {
+  const pc = peers[peerId];
+  if (!pc) return;
+  for (const c of (pending[peerId] || [])) {
+    try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+  }
+  pending[peerId] = [];
+}
+
+// ── Tile management ──
+function tryPlay(video) {
+  video.muted = true;
+  video.play().then(() => { video.muted = false; }).catch(() => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);cursor:pointer;color:#fff;font-size:1rem;z-index:5;border-radius:inherit;';
+    overlay.textContent = '▶ Нажмите';
+    overlay.onclick = () => { video.muted = false; video.play(); overlay.remove(); };
+    video.parentElement.appendChild(overlay);
+  });
+}
+
+function addRemoteTile(peerId) {
+  if (document.getElementById('tile-' + peerId)) return;
+
+  const tile = document.createElement('div');
+  tile.className = 'tile';
+  tile.id = 'tile-' + peerId;
+
+  const avatar = document.createElement('div');
+  avatar.className = 'tile-avatar';
+  avatar.textContent = '👤';
+
+  const video = document.createElement('video');
+  video.id = 'rv-' + peerId;
+  video.autoplay = true;
+  video.playsInline = true;
+  video.setAttribute('playsinline', '');
+  if (remoteStreams[peerId]) { video.srcObject = remoteStreams[peerId]; tryPlay(video); }
+
+  const label = document.createElement('div');
+  label.className = 'tile-label';
+  label.innerHTML = 'Участник <span class="mic-off">🔇</span>';
+
+  tile.appendChild(avatar);
+  tile.appendChild(video);
+  tile.appendChild(label);
+
+  // Apply known media state
+  if (peerMedia[peerId]) applyPeerMedia(peerId, peerMedia[peerId]);
+
+  grid.appendChild(tile);
+  updateGrid();
+
+  // Setup speaking detection when stream ready
+  if (remoteStreams[peerId]?.getAudioTracks().length) {
+    setupSpeaking(remoteStreams[peerId], 'tile-' + peerId);
+  }
+}
+
+function removePeer(peerId) {
+  peers[peerId]?.close();
+  delete peers[peerId];
+  delete remoteStreams[peerId];
+  delete pending[peerId];
+  delete peerMedia[peerId];
+  audioCtxMap['tile-' + peerId]?.close();
+  delete audioCtxMap['tile-' + peerId];
+  document.getElementById('tile-' + peerId)?.remove();
+  updateGrid();
+  updateStatusCount();
+}
+
+function applyPeerMedia(peerId, { audio, video }) {
+  peerMedia[peerId] = { audio, video };
+  const tile = document.getElementById('tile-' + peerId);
+  if (!tile) return;
+  tile.classList.toggle('muted', !audio);
+  tile.classList.toggle('cam-off', !video);
+}
+
+// ── Signaling ──
+socket.on('peer-joined', ({ peerId }) => { addRemoteTile(peerId); });
+
+socket.on('offer', async ({ from, offer }) => {
+  addRemoteTile(from);
+  const pc = createPC(from);
+  await pc.setRemoteDescription(new RTCSessionDescription(offer));
+  await flushPending(from);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  socket.emit('answer', { to: from, answer });
+  // Send our media state to new peer
+  socket.emit('media-state', { audio: micOn, video: camOn });
+});
+
+socket.on('answer', async ({ from, answer }) => {
+  const pc = peers[from];
+  if (!pc) return;
+  await pc.setRemoteDescription(new RTCSessionDescription(answer));
+  await flushPending(from);
+});
+
+socket.on('ice-candidate', async ({ from, candidate }) => {
+  const pc = peers[from];
+  if (pc?.remoteDescription) {
+    try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
+  } else {
+    if (!pending[from]) pending[from] = [];
+    pending[from].push(candidate);
+  }
+});
+
+socket.on('peer-left', ({ peerId }) => removePeer(peerId));
+
+socket.on('peer-media', ({ peerId, audio, video }) => {
+  applyPeerMedia(peerId, { audio, video });
+  // Setup speaking when stream arrives
+  const rs = remoteStreams[peerId];
+  if (rs && !audioCtxMap['tile-' + peerId]) setupSpeaking(rs, 'tile-' + peerId);
+});
+
+// ── Chat ──
+function formatTime(ts) {
+  return new Date(ts).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+}
+
+function appendMsg(text, mine, time) {
+  const div = document.createElement('div');
+  div.className = 'msg' + (mine ? ' mine' : '');
+  div.innerHTML = `<div class="msg-bubble">${escapeHtml(text)}</div><div class="msg-time">${formatTime(time)}</div>`;
+  chatMsgs.appendChild(div);
+  chatMsgs.scrollTop = chatMsgs.scrollHeight;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+socket.on('chat', ({ from, text, time }) => {
+  const mine = from === socket.id;
+  appendMsg(text, mine, time);
+  if (!chatOpen && !mine) {
+    unreadCount++;
+    chatBtn.dataset.unread = unreadCount;
+    chatBtn.classList.add('chat-has-unread');
+  }
+});
+
+function sendChat() {
+  const text = chatInput.value.trim();
+  if (!text) return;
+  socket.emit('chat', { text });
+  chatInput.value = '';
+}
+
+document.getElementById('chat-send').addEventListener('click', sendChat);
+chatInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } });
+
+document.getElementById('chatBtn').addEventListener('click', () => {
+  chatOpen = !chatOpen;
+  chatPanel.classList.toggle('open', chatOpen);
+  if (chatOpen) {
+    unreadCount = 0;
+    chatBtn.dataset.unread = '';
+    chatBtn.classList.remove('chat-has-unread');
+    setTimeout(() => chatInput.focus(), 300);
+  }
+});
+
+document.getElementById('chat-close').addEventListener('click', () => {
+  chatOpen = false;
+  chatPanel.classList.remove('open');
+});
+
+// ── Controls ──
+document.getElementById('micBtn').addEventListener('click', () => {
+  micOn = !micOn;
+  localStream?.getAudioTracks().forEach(t => t.enabled = micOn);
+  document.getElementById('micBtn').textContent = micOn ? '🎤' : '🔇';
+  document.getElementById('micBtn').classList.toggle('off', !micOn);
+  document.getElementById('tile-local').classList.toggle('muted', !micOn);
+  socket.emit('media-state', { audio: micOn, video: camOn });
+});
+
+document.getElementById('camBtn').addEventListener('click', () => {
+  camOn = !camOn;
+  localStream?.getVideoTracks().forEach(t => t.enabled = camOn);
+  document.getElementById('camBtn').textContent = camOn ? '📷' : '🚫';
+  document.getElementById('camBtn').classList.toggle('off', !camOn);
+  document.getElementById('tile-local').classList.toggle('cam-off', !camOn);
+  socket.emit('media-state', { audio: micOn, video: camOn });
+});
+
+document.getElementById('endBtn').addEventListener('click', () => {
+  localStream?.getTracks().forEach(t => t.stop());
+  Object.values(peers).forEach(pc => pc.close());
+  location.href = '/';
+});
+
+// ── Init ──
+async function init() {
+  await startMedia();
+  if (!localStream) return;
+  updateGrid();
+
+  socket.emit('join-room', roomId, async ({ ok, peers: existingPeers }) => {
+    if (!ok) return;
+    for (const peerId of existingPeers) {
+      addRemoteTile(peerId);
+      const pc = createPC(peerId);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit('offer', { to: peerId, offer });
+    }
+    updateStatusCount();
+    socket.emit('media-state', { audio: micOn, video: camOn });
+  });
+}
+
+init();
+</script>
+</body>
+</html>
