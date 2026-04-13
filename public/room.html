@@ -139,6 +139,15 @@
     .quality-badge.medium { color: #ffd43b; }
     .quality-badge.bad    { color: var(--red); }
 
+    /* ── Fullscreen tile ── */
+    .tile.tile-fs {
+      position: fixed !important; inset: 0 !important; z-index: 150;
+      width: 100vw !important; height: 100dvh !important; border-radius: 0;
+    }
+
+    /* ── Timer ── */
+    #timer { font-size: 0.72rem; color: #555; font-variant-numeric: tabular-nums; }
+
     /* ── Chat panel ── */
     #chat-panel {
       width: 0; overflow: hidden; transition: width 0.28s ease;
@@ -222,6 +231,7 @@
       </div>
       <div id="bottom-row">
         <div id="status">Ожидание участников...</div>
+        <div id="timer" style="display:none">00:00</div>
         <div id="brand">разработано <span>neld</span></div>
       </div>
     </div>
@@ -390,6 +400,51 @@ function stopQualityMonitor(peerId) {
   delete qualityTimers[peerId];
 }
 
+// ── Timer ──
+const timerEl = document.getElementById('timer');
+let timerInterval = null;
+
+function startTimer() {
+  if (timerInterval) return;
+  const start = Date.now();
+  timerEl.style.display = '';
+  timerInterval = setInterval(() => {
+    const s = Math.floor((Date.now() - start) / 1000);
+    const m = Math.floor(s / 60);
+    timerEl.textContent = `${String(m).padStart(2,'0')}:${String(s % 60).padStart(2,'0')}`;
+  }, 1000);
+}
+
+// ── Fullscreen on double-tap ──
+const lastTap = {};
+let fullscreenTile = null;
+
+grid.addEventListener('click', (e) => {
+  const tile = e.target.closest('.tile');
+  if (!tile) return;
+  const now = Date.now();
+  if (lastTap[tile.id] && now - lastTap[tile.id] < 350) {
+    delete lastTap[tile.id];
+    if (fullscreenTile === tile) {
+      tile.classList.remove('tile-fs');
+      fullscreenTile = null;
+    } else {
+      if (fullscreenTile) fullscreenTile.classList.remove('tile-fs');
+      tile.classList.add('tile-fs');
+      fullscreenTile = tile;
+    }
+  } else {
+    lastTap[tile.id] = now;
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && fullscreenTile) {
+    fullscreenTile.classList.remove('tile-fs');
+    fullscreenTile = null;
+  }
+});
+
 // ── Speaking detection ──
 const audioCtxMap = {};
 function setupSpeaking(stream, tileId) {
@@ -432,6 +487,28 @@ async function startMedia() {
   }
 }
 
+// ── Reconnect ──
+const callerOf = new Set();
+const reconnectTimers = {};
+
+function scheduleReconnect(peerId) {
+  if (reconnectTimers[peerId] || !callerOf.has(peerId)) return;
+  setStatus('Переподключение...', 'err');
+  reconnectTimers[peerId] = setTimeout(async () => {
+    delete reconnectTimers[peerId];
+    if (!localStream || !document.getElementById('tile-' + peerId)) return;
+    try {
+      peers[peerId]?.close();
+      delete peers[peerId];
+      pending[peerId] = [];
+      const pc = createPC(peerId);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit('offer', { to: peerId, offer });
+    } catch {}
+  }, 3000);
+}
+
 // ── PeerConnection factory ──
 function createPC(peerId) {
   const pc = new RTCPeerConnection({
@@ -464,7 +541,8 @@ function createPC(peerId) {
   };
 
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') removePeer(peerId);
+    if (pc.connectionState === 'failed') scheduleReconnect(peerId);
+    else if (pc.connectionState === 'closed') removePeer(peerId);
   };
 
   return pc;
@@ -538,6 +616,9 @@ function removePeer(peerId) {
   audioCtxMap['tile-' + peerId]?.close();
   delete audioCtxMap['tile-' + peerId];
   stopQualityMonitor(peerId);
+  clearTimeout(reconnectTimers[peerId]);
+  delete reconnectTimers[peerId];
+  callerOf.delete(peerId);
   document.getElementById('tile-' + peerId)?.remove();
   updateGrid();
   updateStatusCount();
@@ -714,7 +795,9 @@ async function init() {
 
   socket.emit('join-room', roomId, async ({ ok, peers: existingPeers }) => {
     if (!ok) return;
+    startTimer();
     for (const peerId of existingPeers) {
+      callerOf.add(peerId);
       addRemoteTile(peerId);
       const pc = createPC(peerId);
       const offer = await pc.createOffer();
