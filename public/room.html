@@ -68,19 +68,6 @@
     .tile.cam-off .tile-avatar { display: flex; }
     .tile:not(.cam-off) .tile-avatar { display: none; }
 
-    /* Local pip */
-    #tile-local.pip {
-      position: absolute; bottom: 10px; right: 10px;
-      width: 90px; height: 130px; border-radius: 12px; z-index: 10;
-      border: 2px solid rgba(255,255,255,0.2);
-      box-shadow: 0 4px 20px rgba(0,0,0,0.6);
-      cursor: pointer; transition: width 0.2s, height 0.2s;
-    }
-    #tile-local.pip.expanded {
-      width: 160px; height: 220px;
-    }
-    #tile-local.pip .tile-label { font-size: 0.6rem; padding: 2px 6px; bottom: 6px; left: 6px; }
-    #tile-local.pip .tile-label .mic-off { display: none; }
 
     /* ── Bottom bar ── */
     #bar {
@@ -294,9 +281,6 @@ function updateStatusCount() {
 function updateGrid() {
   const count = grid.querySelectorAll('.tile').length;
   grid.dataset.n = Math.min(count, 9);
-  const localTile = document.getElementById('tile-local');
-  if (count > 1) localTile.classList.add('pip');
-  else localTile.classList.remove('pip');
 }
 
 // ── Speaking detection ──
@@ -605,13 +589,6 @@ document.getElementById('flipBtn').addEventListener('click', async () => {
   }
 });
 
-// ── Tap pip to expand/shrink ──
-document.getElementById('tile-local').addEventListener('click', () => {
-  const tile = document.getElementById('tile-local');
-  if (tile.classList.contains('pip')) {
-    tile.classList.toggle('expanded');
-  }
-});
 
 // ── Init ──
 async function init() {
