@@ -114,6 +114,31 @@
     #brand { font-size: 0.65rem; color: #2a2a38; letter-spacing: 0.3px; }
     #brand span { color: #4a4a60; }
 
+    /* ── Toast ── */
+    #toast-container {
+      position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+      z-index: 200; display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+    }
+    .toast {
+      background: rgba(26,26,36,0.96); border: 1px solid var(--border);
+      backdrop-filter: blur(14px); padding: 9px 18px; border-radius: 20px;
+      font-size: 0.82rem; color: #f0f0f5; white-space: nowrap;
+      animation: toastIn 0.28s ease, toastOut 0.3s ease 2.7s forwards;
+    }
+    @keyframes toastIn  { from { opacity:0; transform:translateY(-10px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes toastOut { to   { opacity:0; transform:translateY(-10px); } }
+
+    /* ── Quality badge ── */
+    .quality-badge {
+      position: absolute; top: 8px; right: 8px;
+      font-size: 0.62rem; letter-spacing: 0px;
+      padding: 2px 6px; border-radius: 10px;
+      background: rgba(0,0,0,0.55); backdrop-filter: blur(4px);
+    }
+    .quality-badge.good   { color: var(--green); }
+    .quality-badge.medium { color: #ffd43b; }
+    .quality-badge.bad    { color: var(--red); }
+
     /* ── Chat panel ── */
     #chat-panel {
       width: 0; overflow: hidden; transition: width 0.28s ease;
@@ -171,6 +196,7 @@
   </style>
 </head>
 <body>
+<div id="toast-container"></div>
 <div id="app">
   <!-- Main area -->
   <div id="main">
@@ -281,6 +307,87 @@ function updateStatusCount() {
 function updateGrid() {
   const count = grid.querySelectorAll('.tile').length;
   grid.dataset.n = Math.min(count, 9);
+}
+
+// ── Toast ──
+function showToast(text) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = text;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 3100);
+}
+
+// ── Sounds ──
+function playSound(type) {
+  try {
+    const ctx = new AudioContext();
+    const gain = ctx.createGain();
+    gain.connect(ctx.destination);
+    gain.gain.setValueAtTime(0.12, ctx.currentTime);
+
+    const notes = type === 'join'
+      ? [{ f: 523, t: 0 }, { f: 659, t: 0.12 }]
+      : [{ f: 659, t: 0 }, { f: 440, t: 0.12 }];
+
+    notes.forEach(({ f, t }) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(f, ctx.currentTime + t);
+      osc.connect(gain);
+      osc.start(ctx.currentTime + t);
+      osc.stop(ctx.currentTime + t + 0.18);
+    });
+
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.45);
+    setTimeout(() => ctx.close(), 600);
+  } catch {}
+}
+
+// ── Connection quality ──
+const qualityTimers = {};
+
+function startQualityMonitor(peerId) {
+  qualityTimers[peerId] = setInterval(async () => {
+    const pc = peers[peerId];
+    if (!pc) { stopQualityMonitor(peerId); return; }
+    try {
+      const stats = await pc.getStats();
+      let rtt = null, lost = 0, received = 0;
+      stats.forEach(r => {
+        if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded')
+          rtt = r.currentRoundTripTime ?? null;
+        if (r.type === 'inbound-rtp' && r.kind === 'video') {
+          lost += r.packetsLost || 0;
+          received += r.packetsReceived || 0;
+        }
+      });
+
+      const tile = document.getElementById('tile-' + peerId);
+      if (!tile) return;
+      let badge = tile.querySelector('.quality-badge');
+      if (!badge) { badge = document.createElement('div'); tile.appendChild(badge); }
+
+      let q = 'good';
+      if (rtt !== null) {
+        if (rtt > 0.35) q = 'bad';
+        else if (rtt > 0.15) q = 'medium';
+      }
+      if (received > 50) {
+        const loss = lost / (lost + received);
+        if (loss > 0.08) q = 'bad';
+        else if (loss > 0.02 && q !== 'bad') q = 'medium';
+      }
+
+      badge.className = 'quality-badge ' + q;
+      badge.textContent = q === 'good' ? '●●●' : q === 'medium' ? '●●○' : '●○○';
+    } catch {}
+  }, 3000);
+}
+
+function stopQualityMonitor(peerId) {
+  clearInterval(qualityTimers[peerId]);
+  delete qualityTimers[peerId];
 }
 
 // ── Speaking detection ──
@@ -414,6 +521,7 @@ function addRemoteTile(peerId) {
 
   grid.appendChild(tile);
   updateGrid();
+  startQualityMonitor(peerId);
 
   // Setup speaking detection when stream ready
   if (remoteStreams[peerId]?.getAudioTracks().length) {
@@ -429,9 +537,12 @@ function removePeer(peerId) {
   delete peerMedia[peerId];
   audioCtxMap['tile-' + peerId]?.close();
   delete audioCtxMap['tile-' + peerId];
+  stopQualityMonitor(peerId);
   document.getElementById('tile-' + peerId)?.remove();
   updateGrid();
   updateStatusCount();
+  showToast('👤 Участник вышел');
+  playSound('leave');
 }
 
 function applyPeerMedia(peerId, { audio, video }) {
@@ -443,7 +554,11 @@ function applyPeerMedia(peerId, { audio, video }) {
 }
 
 // ── Signaling ──
-socket.on('peer-joined', ({ peerId }) => { addRemoteTile(peerId); });
+socket.on('peer-joined', ({ peerId }) => {
+  addRemoteTile(peerId);
+  showToast('👋 Участник подключился');
+  playSound('join');
+});
 
 socket.on('offer', async ({ from, offer }) => {
   addRemoteTile(from);
