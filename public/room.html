@@ -70,19 +70,25 @@
 
     /* Local pip */
     #tile-local.pip {
-      position: absolute; bottom: 88px; right: 10px;
+      position: absolute; bottom: 10px; right: 10px;
       width: 90px; height: 130px; border-radius: 12px; z-index: 10;
       border: 2px solid rgba(255,255,255,0.2);
       box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+      cursor: pointer; transition: width 0.2s, height 0.2s;
+    }
+    #tile-local.pip.expanded {
+      width: 160px; height: 220px;
     }
     #tile-local.pip .tile-label { font-size: 0.6rem; padding: 2px 6px; bottom: 6px; left: 6px; }
+    #tile-local.pip .tile-label .mic-off { display: none; }
 
     /* ── Bottom bar ── */
     #bar {
       background: rgba(12,12,18,0.97); backdrop-filter: blur(16px);
       border-top: 1px solid var(--border);
-      padding: 10px 14px env(safe-area-inset-bottom, 10px);
+      padding: 10px 14px max(env(safe-area-inset-bottom, 0px), 16px);
       display: flex; flex-direction: column; gap: 8px; z-index: 20;
+      flex-shrink: 0;
     }
     #share-row {
       display: flex; align-items: center; gap: 8px;
@@ -114,9 +120,12 @@
       font-size: 0.65rem; font-weight: 700; display: flex; align-items: center; justify-content: center; color: #fff;
     }
 
-    #status { text-align: center; font-size: 0.72rem; color: #444; }
+    #bottom-row { display: flex; align-items: center; justify-content: space-between; }
+    #status { font-size: 0.72rem; color: #444; }
     #status.ok { color: var(--green); }
     #status.err { color: #ff6b6b; }
+    #brand { font-size: 0.65rem; color: #2a2a38; letter-spacing: 0.3px; }
+    #brand span { color: #4a4a60; }
 
     /* ── Chat panel ── */
     #chat-panel {
@@ -195,10 +204,13 @@
         <button class="ctrl" id="micBtn" title="Микрофон">🎤</button>
         <button class="ctrl" id="camBtn" title="Камера">📷</button>
         <button class="ctrl danger" id="endBtn" title="Завершить">📵</button>
+        <button class="ctrl" id="flipBtn" title="Сменить камеру">🔄</button>
         <button class="ctrl" id="chatBtn" title="Чат">💬</button>
-        <button class="ctrl" id="shareBtn" title="Поделиться">🔗</button>
       </div>
-      <div id="status">Ожидание участников...</div>
+      <div id="bottom-row">
+        <div id="status">Ожидание участников...</div>
+        <div id="brand">разработано <span>neld</span></div>
+      </div>
     </div>
   </div>
 
@@ -236,10 +248,11 @@ const iceServers = [
 // ── State ──
 let localStream = null;
 let micOn = true, camOn = true;
+let facingMode = 'user';
 const peers = {};
 const remoteStreams = {};
 const pending = {};
-const peerMedia = {}; // peerId -> { audio, video }
+const peerMedia = {};
 let chatOpen = false, unreadCount = 0;
 let mySocketId = null;
 
@@ -258,18 +271,12 @@ document.getElementById('roomCodeDisplay').textContent = roomId;
 
 // ── Copy link ──
 document.getElementById('copy-btn').addEventListener('click', () => {
-  navigator.clipboard.writeText(location.href);
-  document.getElementById('copy-btn').textContent = '✓ Скопировано';
-  setTimeout(() => document.getElementById('copy-btn').textContent = 'Копировать ссылку', 2000);
-});
-
-document.getElementById('shareBtn').addEventListener('click', () => {
   if (navigator.share) {
     navigator.share({ title: 'Видеозвонок', url: location.href });
   } else {
     navigator.clipboard.writeText(location.href);
-    setStatus('Ссылка скопирована', 'ok');
-    setTimeout(() => updateStatusCount(), 2000);
+    document.getElementById('copy-btn').textContent = '✓ Скопировано';
+    setTimeout(() => document.getElementById('copy-btn').textContent = 'Копировать ссылку', 2000);
   }
 });
 
@@ -383,13 +390,12 @@ async function flushPending(peerId) {
 // ── Tile management ──
 function tryPlay(video) {
   video.muted = true;
-  video.play().then(() => { video.muted = false; }).catch(() => {
-    const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);cursor:pointer;color:#fff;font-size:1rem;z-index:5;border-radius:inherit;';
-    overlay.textContent = '▶ Нажмите';
-    overlay.onclick = () => { video.muted = false; video.play(); overlay.remove(); };
-    video.parentElement.appendChild(overlay);
-  });
+  video.play()
+    .then(() => { setTimeout(() => { video.muted = false; }, 300); })
+    .catch(() => {
+      // Silent fail — video stays muted until user interacts
+      document.addEventListener('click', () => { video.muted = false; video.play().catch(() => {}); }, { once: true });
+    });
 }
 
 function addRemoteTile(peerId) {
@@ -568,6 +574,43 @@ document.getElementById('endBtn').addEventListener('click', () => {
   localStream?.getTracks().forEach(t => t.stop());
   Object.values(peers).forEach(pc => pc.close());
   location.href = '/';
+});
+
+// ── Flip camera ──
+document.getElementById('flipBtn').addEventListener('click', async () => {
+  facingMode = facingMode === 'user' ? 'environment' : 'user';
+  try {
+    const newStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24 } },
+      audio: false
+    });
+    const newTrack = newStream.getVideoTracks()[0];
+    // Replace in all peer connections
+    for (const pc of Object.values(peers)) {
+      const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+      if (sender) await sender.replaceTrack(newTrack);
+    }
+    // Replace in local stream
+    localStream.getVideoTracks().forEach(t => t.stop());
+    localStream.removeTrack(localStream.getVideoTracks()[0]);
+    localStream.addTrack(newTrack);
+    document.getElementById('localVideo').srcObject = localStream;
+    // Restart speaking detection
+    audioCtxMap['tile-local']?.close();
+    delete audioCtxMap['tile-local'];
+    setupSpeaking(localStream, 'tile-local');
+  } catch (e) {
+    setStatus('Нет второй камеры', 'err');
+    setTimeout(() => updateStatusCount(), 2000);
+  }
+});
+
+// ── Tap pip to expand/shrink ──
+document.getElementById('tile-local').addEventListener('click', () => {
+  const tile = document.getElementById('tile-local');
+  if (tile.classList.contains('pip')) {
+    tile.classList.toggle('expanded');
+  }
 });
 
 // ── Init ──
