@@ -261,11 +261,14 @@ const myId = null; // assigned on connect
 
 const iceServers = [
   { urls: 'stun:stun.cloudflare.com:3478' },
-  { urls: 'stun:freestun.net:3479' },
-  { urls: 'turn:freestun.net:3479',  username: 'free', credential: 'free' },
-  { urls: 'turn:freestun.net:5350',  username: 'free', credential: 'free' },
-  { urls: 'stun:stun.l.google.com:19302' },
+  // metered.ca — надёжный TURN, порт 80/443/TLS не блокируется
+  { urls: 'turn:openrelay.metered.ca:80',              username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443',             username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turns:openrelay.metered.ca:443',            username: 'openrelayproject', credential: 'openrelayproject' },
+  // freestun — резерв
+  { urls: 'turn:freestun.net:3479', username: 'free', credential: 'free' },
+  { urls: 'turn:freestun.net:5350', username: 'free', credential: 'free' },
 ];
 
 // ── State ──
@@ -477,8 +480,8 @@ function setupSpeaking(stream, tileId) {
 async function startMedia() {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000, channelCount: 1 }
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24, max: 30 } },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000 }
     });
     document.getElementById('localVideo').srcObject = localStream;
     setupSpeaking(localStream, 'tile-local');
@@ -497,10 +500,9 @@ async function applyQualitySettings(pc) {
       const params = sender.getParameters();
       if (!params.encodings?.length) continue;
       if (sender.track?.kind === 'video') {
-        params.encodings[0].maxBitrate = 1_500_000;
-        params.encodings[0].maxFramerate = 30;
+        params.encodings[0].maxBitrate = 600_000; // умеренно — стабильность важнее качества
       } else if (sender.track?.kind === 'audio') {
-        params.encodings[0].maxBitrate = 128_000;
+        params.encodings[0].maxBitrate = 64_000;
       }
       await sender.setParameters(params);
     } catch {}
@@ -529,7 +531,7 @@ function startReconnectLoop(peerId) {
     const state = pc?.connectionState;
     if (state === 'connected' || state === 'connecting') return;
     doReconnect(peerId);
-  }, 4000);
+  }, 8000);
 }
 
 function stopReconnectLoop(peerId) {
@@ -562,6 +564,18 @@ function createPC(peerId) {
   pc.onicecandidate = (e) => {
     if (e.candidate) socket.emit('ice-candidate', { to: peerId, candidate: e.candidate });
   };
+
+  // ── Keepalive DataChannel — бьёт пинг каждые 5с, не даёт NAT протухнуть ──
+  if (callerOf.has(peerId)) {
+    try {
+      const dc = pc.createDataChannel('ka', { ordered: false, maxRetransmits: 0 });
+      const kaTick = setInterval(() => {
+        if (dc.readyState === 'open') try { dc.send('1'); } catch {}
+      }, 5000);
+      dc.onclose = () => clearInterval(kaTick);
+    } catch {}
+  }
+  pc.ondatachannel = () => {}; // принимаем канал от другой стороны
 
   pc.oniceconnectionstatechange = () => {
     if (pc.iceConnectionState === 'disconnected') { setStatus('Переподключение...', 'err'); pc.restartIce(); }
