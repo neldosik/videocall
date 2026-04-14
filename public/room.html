@@ -477,8 +477,8 @@ function setupSpeaking(stream, tileId) {
 async function startMedia() {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24, max: 30 } },
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000, channelCount: 1 }
     });
     document.getElementById('localVideo').srcObject = localStream;
     setupSpeaking(localStream, 'tile-local');
@@ -489,24 +489,52 @@ async function startMedia() {
 
 // ── Reconnect ──
 const callerOf = new Set();
-const reconnectTimers = {};
+const reconnectLoops = {}; // peerId → interval id
 
-function scheduleReconnect(peerId) {
-  if (reconnectTimers[peerId] || !callerOf.has(peerId)) return;
-  setStatus('Переподключение...', 'err');
-  reconnectTimers[peerId] = setTimeout(async () => {
-    delete reconnectTimers[peerId];
-    if (!localStream || !document.getElementById('tile-' + peerId)) return;
+async function applyQualitySettings(pc) {
+  for (const sender of pc.getSenders()) {
     try {
-      peers[peerId]?.close();
-      delete peers[peerId];
-      pending[peerId] = [];
-      const pc = createPC(peerId);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      socket.emit('offer', { to: peerId, offer });
+      const params = sender.getParameters();
+      if (!params.encodings?.length) continue;
+      if (sender.track?.kind === 'video') {
+        params.encodings[0].maxBitrate = 1_500_000;
+        params.encodings[0].maxFramerate = 30;
+      } else if (sender.track?.kind === 'audio') {
+        params.encodings[0].maxBitrate = 128_000;
+      }
+      await sender.setParameters(params);
     } catch {}
-  }, 3000);
+  }
+}
+
+async function doReconnect(peerId) {
+  if (!localStream || !document.getElementById('tile-' + peerId)) return;
+  try {
+    peers[peerId]?.close();
+    delete peers[peerId];
+    pending[peerId] = [];
+    const pc = createPC(peerId);
+    const offer = await pc.createOffer({ iceRestart: true });
+    await pc.setLocalDescription(offer);
+    socket.emit('offer', { to: peerId, offer });
+  } catch {}
+}
+
+function startReconnectLoop(peerId) {
+  if (reconnectLoops[peerId]) return;
+  setStatus('Переподключение...', 'err');
+  reconnectLoops[peerId] = setInterval(() => {
+    if (!callerOf.has(peerId)) return;
+    const pc = peers[peerId];
+    const state = pc?.connectionState;
+    if (state === 'connected' || state === 'connecting') return;
+    doReconnect(peerId);
+  }, 4000);
+}
+
+function stopReconnectLoop(peerId) {
+  clearInterval(reconnectLoops[peerId]);
+  delete reconnectLoops[peerId];
 }
 
 // ── PeerConnection factory ──
@@ -536,12 +564,18 @@ function createPC(peerId) {
   };
 
   pc.oniceconnectionstatechange = () => {
-    if (pc.iceConnectionState === 'failed') { setStatus('Переподключение...', 'err'); pc.restartIce(); }
-    if (pc.iceConnectionState === 'connected') updateStatusCount();
+    if (pc.iceConnectionState === 'disconnected') { setStatus('Переподключение...', 'err'); pc.restartIce(); }
+    if (pc.iceConnectionState === 'failed') pc.restartIce();
+    if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+      stopReconnectLoop(peerId);
+      updateStatusCount();
+      applyQualitySettings(pc);
+    }
   };
 
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed') scheduleReconnect(peerId);
+    if (pc.connectionState === 'failed') startReconnectLoop(peerId);
+    else if (pc.connectionState === 'connected') { stopReconnectLoop(peerId); applyQualitySettings(pc); }
     else if (pc.connectionState === 'closed') removePeer(peerId);
   };
 
@@ -616,8 +650,7 @@ function removePeer(peerId) {
   audioCtxMap['tile-' + peerId]?.close();
   delete audioCtxMap['tile-' + peerId];
   stopQualityMonitor(peerId);
-  clearTimeout(reconnectTimers[peerId]);
-  delete reconnectTimers[peerId];
+  stopReconnectLoop(peerId);
   callerOf.delete(peerId);
   document.getElementById('tile-' + peerId)?.remove();
   updateGrid();
